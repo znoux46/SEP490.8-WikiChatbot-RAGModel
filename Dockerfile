@@ -18,11 +18,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Cấp quyền thực thi cho script khởi động
+RUN chmod +x start.sh
+
 # Create data directories
 RUN mkdir -p /app/data/uploads /app/data/processed_data /app/data/raw_data
 
 # Expose port
 EXPOSE 10000
 
-# Default command (can be overridden in docker-compose)
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}
+# Thay đổi lệnh CMD để chạy script thay vì uvicorn trực tiếp
+CMD ["./start.sh"]
