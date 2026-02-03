@@ -353,9 +353,9 @@ CONTEXT:
         answer = self.rag_chain.invoke({"docs": docs, "question": question})
         answer = (answer or "").strip()
         
-        # Normalize fallback
-        if not answer or ("không tìm thấy" in answer.lower() and "tài liệu" in answer.lower()):
-            answer = "Tôi không tìm thấy thông tin này trong tài liệu."
+        # # Normalize fallback
+        # if not answer or ("không tìm thấy" in answer.lower() and "tài liệu" in answer.lower()):
+        #     answer = "Tôi không tìm thấy thông tin này trong tài liệu."
         
         return {
             'answer': answer,
