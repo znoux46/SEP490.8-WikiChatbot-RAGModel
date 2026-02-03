@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_google_generativeai import ChatGoogleGenerativeAI
 
 from app.config import settings
 from app.services.search_service import SearchService
@@ -45,15 +46,17 @@ class RAGService:
             print(f"🤖 Using GROQ model from settings: {settings.GROQ_MODEL_NAME}")
         print(f"🤖 Initializing {effective_model}...")
         # Support Groq or Google Gemini (if model name suggests gemini-*)
-        if effective_model and effective_model.lower().startswith("gemini") and settings.GEMINI_API_KEY:
+        if effective_model.lower().startswith("gemini"):
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
-
                 print(f"🤖 Using Google Gemini model: {effective_model}")
-                self.llm = ChatGoogleGenerativeAI(model=effective_model, api_key=settings.GEMINI_API_KEY, temperature=temperature)
-            except Exception as e:
-                print(f"⚠️ Failed to initialize Google Gemini LLM ({e}), falling back to Groq client")
-                self.llm = ChatGroq(model=effective_model, api_key=settings.GROQ_API_KEY, temperature=temperature)
+                self.llm = ChatGoogleGenerativeAI(
+                    model=effective_model, 
+                    google_api_key=settings.GEMINI_API_KEY, 
+                    temperature=temperature
+                )
+            except ImportError:
+                print("⚠️ Please install langchain-google-genai")
         else:
             self.llm = ChatGroq(
                 model=effective_model,
