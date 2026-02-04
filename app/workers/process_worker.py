@@ -149,8 +149,19 @@ def process_document(job_id, document_id, file_path, source_type, **kwargs):
         return {"status": "success", "document_id": document_id}
 
     except Exception as e:
-        if document: document.status = "failed"
-        db.commit()
+        # 1. Phải Rollback ngay lập tức để hủy bỏ các lệnh lỗi trước đó
+        db.rollback() 
+        
+        # 2. Bây giờ transaction đã sạch, bạn có thể mở một lệnh mới để cập nhật status
+        try:
+            document = db.query(Document).filter(Document.id == document_id).first()
+            if document:
+                document.status = "failed"
+                db.commit()
+        except:
+            db.rollback() # Phòng hờ trường hợp cập nhật status cũng lỗi
+            
+        print(f"Worker Error: {str(e)}")
         raise e
     finally:
         db.close()
