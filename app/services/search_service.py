@@ -4,11 +4,16 @@ Implements RRF (Reciprocal Rank Fusion) for combining BM25 and semantic search
 """
 import re
 import math
+import json
+import hashlib
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from app.database.models import Chunk, Document
 from app.services.embedding_service import get_embedding_service
+from collections import OrderedDict
+from threading import Lock
+import copy
 
 
 class SearchService:
@@ -18,6 +23,11 @@ class SearchService:
         self.db = db
         self.embedding_service = get_embedding_service()
         self._auto_stopwords: Optional[set] = None
+        # In-memory caches to reduce repeated DB / embedding work
+        self._semantic_cache: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+        self._hybrid_cache: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+        self._cache_lock = Lock()
+        self._cache_max_size = 1024
     
     @staticmethod
     def _tokenize_vi(text: str) -> List[str]:
@@ -193,7 +203,17 @@ class SearchService:
         """
         Semantic search using pgvector cosine similarity
         """
-        # Generate query embedding
+        # Build cache key
+        key_obj = {"q": query, "k": k, "docs": document_ids}
+        cache_key = hashlib.sha256(json.dumps(key_obj, sort_keys=True, default=str).encode()).hexdigest()
+        with self._cache_lock:
+            if cache_key in self._semantic_cache:
+                val = self._semantic_cache.pop(cache_key)
+                # refresh LRU
+                self._semantic_cache[cache_key] = val
+                return copy.deepcopy(val)
+
+        # Generate query embedding (embedding_service has its own cache)
         query_embedding = self.embedding_service.embed_text(query)
         
         # Base query with cosine distance (pgvector accepts list directly)
@@ -226,7 +246,7 @@ class SearchService:
             print(f"❌ Semantic search error: {e}")
             return []
 
-        return [
+        out = [
             {
                 'id': r.id,
                 'content': r.content,
@@ -242,6 +262,16 @@ class SearchService:
             }
             for r in results
         ]
+
+        # store in LRU cache
+        with self._cache_lock:
+            if cache_key in self._semantic_cache:
+                self._semantic_cache.pop(cache_key)
+            self._semantic_cache[cache_key] = copy.deepcopy(out)
+            if len(self._semantic_cache) > self._cache_max_size:
+                self._semantic_cache.popitem(last=False)
+
+        return out
     
     def hybrid_search(
         self,
@@ -258,9 +288,21 @@ class SearchService:
         Hybrid search using RRF (Reciprocal Rank Fusion)
         Combines BM25 and semantic search results
         """
-        # Hybrid search has been disabled — use semantic (vector) search only
-        bm25_res = self.bm25_search(query, k=k*2, document_ids=document_ids)
-        semantic_res = self.semantic_search(query, k=k*2, document_ids=document_ids)
+        # Cache key for hybrid search
+        key_obj = {"q": query, "k": k, "bm25_w": bm25_weight, "sem_w": semantic_weight, "docs": document_ids}
+        cache_key = hashlib.sha256(json.dumps(key_obj, sort_keys=True, default=str).encode()).hexdigest()
+        with self._cache_lock:
+            if cache_key in self._hybrid_cache:
+                val = self._hybrid_cache.pop(cache_key)
+                self._hybrid_cache[cache_key] = val
+                return copy.deepcopy(val)
+
+        # Determine per-stage k values and cap them to avoid heavy queries
+        bm25_k = bm25_k or min(max(k * 2, 20), 200)
+        semantic_k = semantic_k or min(max(k * 2, 20), 200)
+
+        bm25_res = self.bm25_search(query, k=bm25_k, document_ids=document_ids)
+        semantic_res = self.semantic_search(query, k=semantic_k, document_ids=document_ids)
         scores: Dict[str, Dict[str, Any]] = {}
         # semantic_k = semantic_k or max(k, 20)
         # print(f"\n🔍 SEMANTIC-ONLY SEARCH (hybrid disabled)")
@@ -284,9 +326,18 @@ class SearchService:
         # Sắp xếp lại theo điểm số mới
         fused_results = sorted(scores.values(), key=lambda x: x['score'], reverse=True)
         final_docs = [item['doc'] for item in fused_results[:k]]
-        
-        print(f"✅ Hybrid Fusion completed: {len(final_docs)} chunks selected")
-        return final_docs
+        out = final_docs
+
+        # cache hybrid results
+        with self._cache_lock:
+            if cache_key in self._hybrid_cache:
+                self._hybrid_cache.pop(cache_key)
+            self._hybrid_cache[cache_key] = copy.deepcopy(out)
+            if len(self._hybrid_cache) > self._cache_max_size:
+                self._hybrid_cache.popitem(last=False)
+
+        print(f"✅ Hybrid Fusion completed: {len(out)} chunks selected")
+        return out
 
 
 def get_search_service(db: Session) -> SearchService:

@@ -14,6 +14,11 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.config import settings
 from app.services.search_service import SearchService
+from collections import OrderedDict
+from threading import Lock
+import copy
+import json
+import hashlib
 
 
 class RAGService:
@@ -27,7 +32,7 @@ class RAGService:
         top_k: int = 20,
         bm25_weight: float = 0.6,
         semantic_weight: float = 0.4,
-        first_pass_k: int = 12,
+        first_pass_k: int = 25,
         variant_count: int = 5,
         rrf_k: int = 60
     ):
@@ -123,6 +128,11 @@ CONTEXT:
         self.alias_chain = self.alias_prompt | self.llm | StrOutputParser()
         
         print("✅ RAG Service ready!")
+
+        # Simple in-memory cache for retrieve results (question -> fused docs)
+        self._retrieve_cache: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+        self._retrieve_lock = Lock()
+        self._retrieve_cache_max = 256
     
     @staticmethod
     def _tokenize_vi(text: str) -> List[str]:
@@ -269,6 +279,14 @@ CONTEXT:
         5. RRF fusion of all results
         """
         print(f"\n🔍 Retrieve: '{question}'")
+        # small retrieve cache check
+        cache_key = hashlib.sha256(json.dumps({"q": question, "docs": document_ids}, sort_keys=True, default=str).encode()).hexdigest()
+        with self._retrieve_lock:
+            if cache_key in self._retrieve_cache:
+                val = self._retrieve_cache.pop(cache_key)
+                self._retrieve_cache[cache_key] = val
+                print("♻️ Returning cached retrieve results")
+                return copy.deepcopy(val)
         
         # Pass 1: Initial retrieval
         first_pass = self.search_service.hybrid_search(
@@ -291,6 +309,8 @@ CONTEXT:
         
         # Generate variants
         variants = self._make_variants(question, info)
+        # dedupe variants and keep order
+        variants = list(dict.fromkeys(variants))
         print(f"🧩 Variants: {len(variants)}")
         for i, v in enumerate(variants, 1):
             print(f"   Q{i}: {v}")
@@ -298,10 +318,12 @@ CONTEXT:
         # Pass 2: Retrieve for each variant
         all_results = [first_pass]
         
+        # Limit per-variant k to reduce load (was 20)
+        per_variant_k = max(self.top_k, 20)
         for variant in variants:
             results = self.search_service.hybrid_search(
                 query=variant,
-                k=max(self.top_k, 20),
+                k=per_variant_k,
                 bm25_weight=self.bm25_weight,
                 semantic_weight=self.semantic_weight,
                 rrf_k=self.rrf_k,
@@ -312,7 +334,14 @@ CONTEXT:
         # Fuse all results
         fused = self._rrf_fuse(all_results, rrf_k=self.rrf_k, top_k=self.top_k)
         print(f"✅ Fused: {len(fused)} chunks")
-        
+        # store in retrieve cache
+        with self._retrieve_lock:
+            if cache_key in self._retrieve_cache:
+                self._retrieve_cache.pop(cache_key)
+            self._retrieve_cache[cache_key] = copy.deepcopy(fused)
+            if len(self._retrieve_cache) > self._retrieve_cache_max:
+                self._retrieve_cache.popitem(last=False)
+
         return fused
     
     def chat(
