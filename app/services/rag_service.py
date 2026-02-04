@@ -32,7 +32,7 @@ class RAGService:
         top_k: int = 20,
         bm25_weight: float = 0.6,
         semantic_weight: float = 0.4,
-        first_pass_k: int = 25,
+        first_pass_k: int = 40,
         variant_count: int = 5,
         rrf_k: int = 60
     ):
@@ -145,14 +145,34 @@ CONTEXT:
     def _format_docs(self, docs: List[Dict[str, Any]]) -> str:
         """Format documents for context"""
         if not docs:
-            return "Không tìm thấy thông tin liên quan trong tài liệu."
-        
+            return ""
+
         formatted = []
         for i, doc in enumerate(docs, 1):
             header = doc.get('h2') or doc.get('h1') or ''
             content = doc.get('content', '')
-            formatted.append(f"--- Đoạn {i} | {header} ---\n{content}")
-        
+
+            # Lightweight meta extraction to highlight aliases / era names / chữ Hán
+            meta_parts = []
+            # tên thật
+            m_name = re.search(r"tên\s+(?:thật|thực)\s*(?:là|:)\s*([^,\.\n]+)", content, flags=re.IGNORECASE)
+            if m_name:
+                meta_parts.append(f"tên thật: {m_name.group(1).strip()}")
+            # niên hiệu
+            m_era = re.search(r"niên\s*hiệu\s*(?:là|:)\s*([^,\.\n]+)", content, flags=re.IGNORECASE)
+            if m_era:
+                meta_parts.append(f"niên hiệu: {m_era.group(1).strip()}")
+            # chữ Hán
+            m_ch = re.search(r"chữ\s*Hán\s*[:：]?\s*([^\)\n]+)", content, flags=re.IGNORECASE)
+            if m_ch:
+                meta_parts.append(f"chữ Hán: {m_ch.group(1).strip()}")
+
+            meta_line = ""
+            if meta_parts:
+                meta_line = "[META: " + "; ".join(meta_parts) + "]\n"
+
+            formatted.append(f"--- Đoạn {i} | {header} ---\n" + meta_line + f"{content}")
+
         return "\n\n".join(formatted)
     
     def _extract_entity_info(
@@ -318,8 +338,8 @@ CONTEXT:
         # Pass 2: Retrieve for each variant
         all_results = [first_pass]
         
-        # Limit per-variant k to reduce load (was 20)
-        per_variant_k = max(self.top_k, 20)
+        # Increase per-variant k to reduce missing important chunks
+        per_variant_k = max(self.top_k, 60)
         for variant in variants:
             results = self.search_service.hybrid_search(
                 query=variant,
@@ -362,17 +382,19 @@ CONTEXT:
         """
         # Retrieve relevant chunks
         docs = self.retrieve(question, document_ids=document_ids)
-        
-        if docs is None:
-            return {
-                'answer': "Tôi không tìm thấy thông tin này trong tài liệu.",
-                'chunks': [],
-                'metadata': {'chunks_used': 0}
-            }
+
+        print("\n💬 Generating answer...")
+        # Try deterministic rule-based answers for short factual queries first
+        rule_ans = self._rule_based_answer(question, docs)
+        if rule_ans:
+            answer = rule_ans
         else:
-            print("\n💬 Generating answer...")
-            answer = self.rag_chain.invoke({"docs": docs, "question": question})
-            answer = (answer or "").strip()
+            # If we have no docs, skip calling the LLM and return final fallback later
+            if not docs:
+                answer = ""
+            else:
+                answer = self.rag_chain.invoke({"docs": docs, "question": question})
+                answer = (answer or "").strip()
             
         if verbose:
             print(f"\n{'='*70}\nCONTEXT:\n{'='*70}")
@@ -385,6 +407,10 @@ CONTEXT:
         # if not answer or ("không tìm thấy" in answer.lower() and "tài liệu" in answer.lower()):
         #     answer = "Tôi không tìm thấy thông tin này trong tài liệu."
         
+        # Final fallback: if still no answer or LLM said it couldn't find, normalize message
+        if not answer or (isinstance(answer, str) and "không tìm thấy" in answer.lower()):
+            answer = "Tôi không tìm thấy thông tin này trong tài liệu."
+
         return {
             'answer': answer,
             'chunks': docs[:10],  # Return top 10 for reference
