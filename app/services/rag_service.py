@@ -334,24 +334,23 @@ CONTEXT:
         # Retrieve relevant chunks
         docs = self.retrieve(question, document_ids=document_ids)
         
-        if not docs:
+        if docs is None:
             return {
                 'answer': "Tôi không tìm thấy thông tin này trong tài liệu.",
                 'chunks': [],
                 'metadata': {'chunks_used': 0}
             }
-        
+        else:
+            print("\n💬 Generating answer...")
+            answer = self.rag_chain.invoke({"docs": docs, "question": question})
+            answer = (answer or "").strip()
+            
         if verbose:
             print(f"\n{'='*70}\nCONTEXT:\n{'='*70}")
             for i, doc in enumerate(docs[:5], 1):
                 print(f"\n📄 Chunk {i}:")
                 print(f"   Headers: {doc.get('h1', '')} / {doc.get('h2', '')}")
                 print(f"   Preview: {doc.get('content', '')[:200]}...")
-        
-        # Generate answer
-        print("\n💬 Generating answer...")
-        answer = self.rag_chain.invoke({"docs": docs, "question": question})
-        answer = (answer or "").strip()
         
         # # Normalize fallback
         # if not answer or ("không tìm thấy" in answer.lower() and "tài liệu" in answer.lower()):
